@@ -1,0 +1,110 @@
+name: Production Release Build
+
+on:
+  push:
+    branches:
+      - Releases
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+  
+#This Part Is For NodeJS Setup But You Can Modify Easily Yourself. Just Change The Technologies.
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Extract and Check Version
+        id: check_version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if the pushed commit has a git tag
+          TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "")
+          
+          # Requirement 5: Do not start if there is no version tag on the push
+          if [ -z "$TAG" ]; then
+            echo "No version tag found on the pushed commit. Stopping workflow."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "VERSION=$TAG" >> $GITHUB_ENV
+          echo "Found tag: $TAG"
+          
+          # Requirement 2: Check if a GitHub release for this tag already exists
+          RELEASE_EXISTS=$(gh release view "$TAG" >/dev/null 2>&1 && echo "yes" || echo "no")
+          
+          if [ "$RELEASE_EXISTS" = "yes" ]; then
+            echo "A release for $TAG already exists in the repository. Stopping workflow."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Release $TAG does not exist yet. Continuing with build."
+          echo "should_run=true" >> $GITHUB_OUTPUT
+
+      - name: Install Dependencies
+        if: steps.check_version.outputs.should_run == 'true'
+  
+  # Again You Can Customize It.
+
+        run: npm install
+
+      - name: Build Windows Executable
+        if: steps.check_version.outputs.should_run == 'true'
+        run: npm run electron-pack
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SHA256 Hash
+        if: steps.check_version.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          # 3. Requirement 3: Generate hash and save to txt file
+          EXE_PATH=$(ls dist/*.exe | head -n 1)
+          
+          if [ -z "$EXE_PATH" ]; then
+            echo "Could not find the compiled executable in dist/ directory!"
+            exit 1
+          fi
+          
+          echo "Found executable at $EXE_PATH"
+          sha256sum "$EXE_PATH" > dist/hash.txt
+          
+          echo "Hash generated:"
+          cat dist/hash.txt
+          
+          # Export exe path for the release step
+          echo "EXE_PATH=$EXE_PATH" >> $GITHUB_ENV
+
+      - name: Create Release and Upload Assets
+        if: steps.check_version.outputs.should_run == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          body: |
+            Automated production build for Restro POS ${{ env.VERSION }}.
+            
+            **Assets:**
+            - Windows Installer
+            - SHA-256 Hash Signature
+          files: |
+            ${{ env.EXE_PATH }}
+            dist/hash.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
